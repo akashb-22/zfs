@@ -188,6 +188,7 @@ typedef enum {
 	ZFS_PROP_IVSET_GUID,		/* not exposed to the user */
 	ZFS_PROP_REDACTED,
 	ZFS_PROP_REDACT_SNAPS,
+	ZFS_PROP_PROTECTED,
 	ZFS_NUM_PROPS
 } zfs_prop_t;
 
@@ -508,6 +509,11 @@ typedef enum {
 	ZFS_VOLMODE_DEV = 2,
 	ZFS_VOLMODE_NONE = 3
 } zfs_volmode_t;
+
+typedef enum {
+	ZFS_PROTECTED_OFF = 0,
+	ZFS_PROTECTED_ON = 1
+} zfs_protected_t;
 
 typedef enum zfs_keystatus {
 	ZFS_KEYSTATUS_NONE = 0,

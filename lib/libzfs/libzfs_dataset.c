@@ -1767,6 +1767,8 @@ zfs_prop_set_list(zfs_handle_t *zhp, nvlist_t *props)
 	int added_resv = 0;
 	zfs_prop_t prop = 0;
 	nvpair_t *elem;
+	char is_protected[ZFS_MAXPROPLEN];
+	uint64_t protected = 1;
 
 	(void) snprintf(errbuf, sizeof (errbuf),
 	    dgettext(TEXT_DOMAIN, "cannot set property for '%s'"),
@@ -1776,6 +1778,28 @@ zfs_prop_set_list(zfs_handle_t *zhp, nvlist_t *props)
 	    zfs_prop_get_int(zhp, ZFS_PROP_ZONED), zhp, zhp->zpool_hdl,
 	    B_FALSE, errbuf)) == NULL)
 		goto error;
+
+	elem = NULL;
+	while ((elem = nvlist_next_nvpair(nvl, elem)) != NULL) {
+		const char *propname = nvpair_name(elem);
+		if (strcmp(propname, "protected") == 0) {
+			(void) nvpair_value_uint64(elem, &protected);
+			printf("debug: Got input to set protected=%lu\n", protected);
+		}
+	}
+	printf("debug: props config start :\n---------------------\n");
+	dump_nvlist(nvl, 0);
+	printf("debug: 2Got input to set protected=%ld\n", protected);
+	printf("debug: props config end :\n---------------------\n");
+	verify(zfs_prop_get(zhp, ZFS_PROP_PROTECTED, is_protected, sizeof (is_protected), NULL, NULL, 0, B_FALSE) == 0);
+	printf("debug: Current protected value = %s\n", is_protected);
+	if (strcmp(is_protected, "off")) {
+		if (protected) {
+			(void) fprintf(stderr, gettext("property cannot be changed "
+			    "when protected property is %s\n"), is_protected);
+			return (1);
+		}
+	}
 
 	/*
 	 * We have to check for any extra properties which need to be added
