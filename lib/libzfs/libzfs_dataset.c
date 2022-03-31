@@ -1719,6 +1719,51 @@ zfs_is_namespace_prop(zfs_prop_t prop)
 	}
 }
 
+static boolean_t
+zfs_get_protected(zfs_handle_t *zhp)
+{
+	char is_protected[128];
+	zfs_prop_get(zhp, ZFS_PROP_PROTECTED, is_protected, sizeof (is_protected), NULL, NULL, 0, B_FALSE);
+	printf("debug: Current protected value = %s for %s\n", is_protected, zhp->zfs_name);
+	if (strcmp(is_protected, "off"))
+		return (B_TRUE);
+	return (B_FALSE);
+}
+
+boolean_t
+zfs_is_protected(zfs_handle_t *zhp)
+{
+	if (zfs_get_protected(zhp)) {
+		(void) fprintf(stderr, gettext("command failed, "
+		    "protected property is on for %s\n"), zhp->zfs_name);
+		return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+static int
+zfs_prop_set_protected(zfs_handle_t *zhp, nvlist_t *nvl)
+{
+	uint64_t protected = 1;
+	nvpair_t *elem;
+	elem = NULL;
+	while ((elem = nvlist_next_nvpair(nvl, elem)) != NULL) {
+		const char *propname = nvpair_name(elem);
+		if (strcmp(propname, "protected") == 0) {
+			(void) nvpair_value_uint64(elem, &protected);
+			printf("debug: Got input to set protected=%lu\n", protected);
+		}
+	}
+	if (zfs_get_protected(zhp)) {
+		if (protected) {
+			(void) fprintf(stderr, gettext("command failed, "
+			    "when protected property is on\n"));
+			return (1);
+		}
+	}
+	return (0);
+}
+
 /*
  * Given a property name and value, set the property for the given dataset.
  */
@@ -1775,6 +1820,9 @@ zfs_prop_set_list(zfs_handle_t *zhp, nvlist_t *props)
 	if ((nvl = zfs_valid_proplist(hdl, zhp->zfs_type, props,
 	    zfs_prop_get_int(zhp, ZFS_PROP_ZONED), zhp, zhp->zpool_hdl,
 	    B_FALSE, errbuf)) == NULL)
+		goto error;
+
+	if (zfs_prop_set_protected(zhp, nvl))
 		goto error;
 
 	/*
@@ -1944,6 +1992,10 @@ zfs_prop_inherit(zfs_handle_t *zhp, const char *propname, boolean_t received)
 	libzfs_handle_t *hdl = zhp->zfs_hdl;
 	char errbuf[1024];
 	zfs_prop_t prop;
+
+	if (zfs_is_protected(zhp)) { /* check if the dataset is protected */
+		return (1);
+	}
 
 	(void) snprintf(errbuf, sizeof (errbuf), dgettext(TEXT_DOMAIN,
 	    "cannot inherit %s for '%s'"), propname, zhp->zfs_name);

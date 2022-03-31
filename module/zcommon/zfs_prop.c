@@ -377,6 +377,12 @@ zfs_prop_init(void)
 		{ NULL }
 	};
 
+	static const zprop_index_t protected_table[] = {
+		{ "off",	ZFS_PROTECTED_OFF },
+		{ "on",		ZFS_PROTECTED_ON},
+		{ NULL }
+	};
+
 	struct zfs_mod_supported_features *sfeatures =
 	    zfs_mod_list_supported(ZFS_SYSFS_DATASET_PROPERTIES);
 
@@ -457,6 +463,10 @@ zfs_prop_init(void)
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "default | full | geom | dev | none", "VOLMODE", volmode_table,
 	    sfeatures);
+	zprop_register_index(ZFS_PROP_PROTECTED, "protected",
+	    ZFS_PROTECTED_OFF, PROP_INHERIT,
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME | ZFS_TYPE_DATASET,
+	    "off | on", "PROTECTED", protected_table, sfeatures);
 
 	/* inherit index (boolean) properties */
 	zprop_register_index(ZFS_PROP_ATIME, "atime", 1, PROP_INHERIT,

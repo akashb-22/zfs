@@ -513,6 +513,7 @@ _LIBZFS_H nvlist_t *zfs_valid_proplist(libzfs_handle_t *, zfs_type_t,
     const char *);
 
 _LIBZFS_H const char *zfs_prop_to_name(zfs_prop_t);
+_LIBZFS_H boolean_t zfs_is_protected(zfs_handle_t *);
 _LIBZFS_H int zfs_prop_set(zfs_handle_t *, const char *, const char *);
 _LIBZFS_H int zfs_prop_set_list(zfs_handle_t *, nvlist_t *);
 _LIBZFS_H int zfs_prop_get(zfs_handle_t *, zfs_prop_t, char *, size_t,

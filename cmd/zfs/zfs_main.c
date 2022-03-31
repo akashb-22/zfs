@@ -872,7 +872,11 @@ zfs_do_clone(int argc, char **argv)
 		nvlist_free(props);
 		return (1);
 	}
-
+	if (zfs_is_protected(zhp)) { /* check if the dataset is protected */
+		zfs_close(zhp);
+		nvlist_free(props);
+		return (1);
+	}
 	if (parents && zfs_name_valid(argv[1], ZFS_TYPE_FILESYSTEM |
 	    ZFS_TYPE_VOLUME)) {
 		/*
@@ -1701,6 +1705,11 @@ zfs_do_destroy(int argc, char **argv)
 		*at = '\0';
 		zhp = zfs_open(g_zfs, argv[0],
 		    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME);
+		if (zfs_is_protected(zhp)) { /* check if snap is protected */
+			rv = 1;
+			goto out;
+		}
+
 		if (zhp == NULL) {
 			nvlist_free(cb.cb_nvl);
 			return (1);
@@ -1759,6 +1768,15 @@ zfs_do_destroy(int argc, char **argv)
 	} else if (pound != NULL) {
 		int err;
 		nvlist_t *nvl;
+		char *tmp, *ds;
+		ds = strdup(argv[0]);
+		ds = strtok_r(ds, "#", &tmp);
+		zhp = zfs_open(g_zfs, ds,
+			ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME);
+                if (zfs_is_protected(zhp)) { /* check if ds corresponding to bm is protected */
+			rv = 1;
+			goto out;
+		}
 
 		if (cb.cb_dryrun) {
 			(void) fprintf(stderr,
@@ -1808,6 +1826,8 @@ zfs_do_destroy(int argc, char **argv)
 		if ((zhp = zfs_open(g_zfs, argv[0], type)) == NULL)
 			return (1);
 
+		if (zfs_is_protected(zhp)) /* check if dataset is protected */
+			return (1);
 		cb.cb_target = zhp;
 
 		/*
@@ -3843,6 +3863,9 @@ zfs_do_rename(int argc, char **argv)
 	if ((zhp = zfs_open(g_zfs, argv[0], types)) == NULL)
 		return (1);
 
+	if (zfs_is_protected(zhp)) { /* check if the dataset is protected */
+		return (1);
+	}
 	/* If we were asked and the name looks good, try to create ancestors. */
 	if (parents && zfs_name_valid(argv[1], zfs_get_type(zhp)) &&
 	    zfs_create_ancestors(g_zfs, argv[1]) != 0) {
@@ -6712,6 +6735,9 @@ share_mount_one(zfs_handle_t *zhp, int op, int flags, char *protocol,
 	uint64_t zoned, canmount;
 	boolean_t shared_nfs, shared_smb;
 
+	if (zfs_is_protected(zhp)) { /* check if the dataset is protected */
+		return (1);
+	}
 	assert(zfs_get_type(zhp) & ZFS_TYPE_FILESYSTEM);
 
 	/*
