@@ -500,7 +500,9 @@ typedef enum {
 
 typedef enum {
 	ZFS_REDUNDANT_METADATA_ALL,
-	ZFS_REDUNDANT_METADATA_MOST
+	ZFS_REDUNDANT_METADATA_MOST,
+	ZFS_REDUNDANT_METADATA_SOME,
+	ZFS_REDUNDANT_METADATA_NONE
 } zfs_redundant_metadata_type_t;
 
 typedef enum {

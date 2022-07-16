@@ -1444,7 +1444,7 @@ affects only files created afterward; existing files are unaffected.
 .Pp
 This property can also be referred to by its shortened column name,
 .Sy recsize .
-.It Sy redundant_metadata Ns = Ns Sy all Ns | Ns Sy most
+.It Sy redundant_metadata Ns = Ns Sy all Ns | Ns Sy most Ns | Ns Sy some Ns | Ns Sy none
 Controls what types of metadata are stored redundantly.
 ZFS stores an extra copy of metadata, so that if a single block is corrupted,
 the amount of user data lost is limited.
@@ -1484,6 +1484,14 @@ bytes each
 of user data can be lost if a single on-disk block is corrupt.
 The exact behavior of which metadata blocks are stored redundantly may change in
 future releases.
+.Pp
+When set to
+.Sy some ,
+ZFS stores an extra copy of few types of small critical metadata.
+.Pp
+When set to
+.Sy none ,
+ZFS does not store any copies of metadata redundantly through this property.
 .Pp
 The default value is
 .Sy all .
