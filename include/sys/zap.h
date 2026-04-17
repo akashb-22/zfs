@@ -110,6 +110,8 @@ typedef enum zap_flags {
 	 * already randomly distributed.
 	 */
 	ZAP_FLAG_PRE_HASHED_KEY = 1 << 2,
+	/* TinyZAP interface for Lustre */
+	ZAP_FLAG_TINYZAP = 1 << 3,
 #if defined(__linux__) && defined(_KERNEL)
 } zfs_zap_flags_t;
 #define	zap_flags_t	zfs_zap_flags_t
@@ -462,6 +464,15 @@ typedef struct zap_stats {
 	uint64_t zs_num_leafs;		/* The number of leaf blocks */
 	uint64_t zs_num_entries;	/* The number of zap entries */
 	uint64_t zs_salt;		/* salt to stir into hash function */
+
+	/*
+	 * TinyZAP: set to B_TRUE if this is a MicroZAP with
+	 * MZAP_FLAG_TINYZAP set in mz_flags.  In this case each entry
+	 * stores a full luz_direntry (tze_value + tze_value2 + tze_fid
+	 * = 24 bytes) instead of one uint64.
+	 */
+	boolean_t zs_is_tinyzap;
+	uint64_t  zs_tinyzap_mz_flags;	/* raw mz_flags from disk */
 
 	/*
 	 * Histograms.  For all histograms, the last index

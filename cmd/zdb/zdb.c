@@ -1089,10 +1089,58 @@ dump_zap_stats(objset_t *os, uint64_t object)
 		return;
 
 	if (zs.zs_ptrtbl_len == 0) {
-		ASSERT(zs.zs_num_blocks == 1);
-		(void) printf("\tmicrozap: %llu bytes, %llu entries\n",
-		    (u_longlong_t)zs.zs_blocksize,
-		    (u_longlong_t)zs.zs_num_entries);
+		if (zs.zs_is_tinyzap) {
+			/*
+			 * TinyZAP: MicroZAP variant with MZAP_FLAG_TINYZAP
+			 * set. Each entry stores a full luz_direntry
+			 * (tze_value + tze_value2 + tze_fid = 24 bytes)
+			 * instead of a single uint64.
+			 */
+			(void) printf("\ttinyzap: %llu bytes, %llu entries"
+			    ", mz_flags=0x%llx\n",
+			    (u_longlong_t)zs.zs_blocksize,
+			    (u_longlong_t)zs.zs_num_entries,
+			    (u_longlong_t)zs.zs_tinyzap_mz_flags);
+			/*
+			 * Dump individual TinyZAP entries when verbosity is high enough.
+			 */
+			if (dump_opt['d'] >= 6) {
+				dmu_buf_t *db;
+				if (dmu_buf_hold(os, object, 0, FTAG, &db,
+				    DMU_READ_PREFETCH) == 0) {
+					mzap_phys_t *mzp = db->db_data;
+					int nchunks = db->db_size / MZAP_ENT_LEN - 1;
+					int found = 0;
+					for (int i = 0; i < nchunks; i++) {
+						tzap_ent_phys_t *tze =
+							(tzap_ent_phys_t *)
+							&mzp->mz_chunk[i];
+						if (tze->tze_name[0] == 0)
+							continue;
+						(void) printf("\t\t[%d] name='%s'\n"
+						    "\t\t    value=0x%016llx"
+						    " value2=0x%016llx\n"
+						    "\t\t    fid=[0x%llx:0x%x:0x%x]"
+						    " cd=0x%x\n",
+						    i, tze->tze_name,
+						    (u_longlong_t)tze->tze_value,
+						    (u_longlong_t)tze->tze_value2,
+						    (u_longlong_t)tze->tze_value2,
+						    tze->tze_fid_oid,
+						    tze->tze_fid_ver,
+						    tze->tze_cd);
+						found++;
+					}
+					if (found == 0)
+						(void) printf("\t\t<no entries>\n");
+					dmu_buf_rele(db, FTAG);
+				}
+			}
+		} else {
+			(void) printf("\tmicrozap: %llu bytes, %llu entries\n",
+			    (u_longlong_t)zs.zs_blocksize,
+			    (u_longlong_t)zs.zs_num_entries);
+		}
 		return;
 	}
 

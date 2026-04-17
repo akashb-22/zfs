@@ -43,6 +43,28 @@
 
 int zap_micro_max_size = MZAP_MAX_BLKSZ;
 
+/* TinyZAP layout verification */
+_Static_assert(sizeof (tzap_ent_phys_t) == MZAP_ENT_LEN,
+    "tzap_ent_phys_t must be 64 bytes");
+_Static_assert(TZAP_NAME_LEN == 36,
+    "TZAP_NAME_LEN must be 36");
+_Static_assert(offsetof(tzap_ent_phys_t, tze_value) == 0,
+    "tze_value must be at offset 0");
+_Static_assert(offsetof(tzap_ent_phys_t, tze_value2) == 8,
+    "tze_value2 must be at offset 8");
+_Static_assert(offsetof(tzap_ent_phys_t, tze_fid_oid) == 16,
+    "tze_fid_oid must be at offset 16");
+_Static_assert(offsetof(tzap_ent_phys_t, tze_fid_ver) == 20,
+    "tze_fid_ver must be at offset 20");
+_Static_assert(offsetof(tzap_ent_phys_t, tze_cd) == 24,
+    "tze_cd must be at offset 24");
+_Static_assert(offsetof(tzap_ent_phys_t, tze_name) == 28,
+    "tze_name must be at offset 28");
+_Static_assert(sizeof (mzap_ent_phys_t) == MZAP_ENT_LEN,
+    "mzap_ent_phys_t must be 64 bytes");
+_Static_assert(offsetof(mzap_phys_t, mz_chunk) == MZAP_ENT_LEN,
+    "mz_chunk must be at offset 64");
+
 static int mzap_upgrade(zap_t **zapp,
     const void *tag, dmu_tx_t *tx, zap_flags_t flags);
 
@@ -263,12 +285,28 @@ mzap_byteswap(mzap_phys_t *buf, size_t size)
 	buf->mz_block_type = BSWAP_64(buf->mz_block_type);
 	buf->mz_salt = BSWAP_64(buf->mz_salt);
 	buf->mz_normflags = BSWAP_64(buf->mz_normflags);
+
+	boolean_t tiny = (buf->mz_flags == MZAP_FLAG_TINYZAP) ||
+	    (BSWAP_64(buf->mz_flags) == MZAP_FLAG_TINYZAP);
+	buf->mz_flags = BSWAP_64(buf->mz_flags);
 	int max = (size / MZAP_ENT_LEN) - 1;
+
 	for (int i = 0; i < max; i++) {
-		buf->mz_chunk[i].mze_value =
-		    BSWAP_64(buf->mz_chunk[i].mze_value);
-		buf->mz_chunk[i].mze_cd =
-		    BSWAP_32(buf->mz_chunk[i].mze_cd);
+		if (tiny) {
+			tzap_ent_phys_t *tze =
+			    (tzap_ent_phys_t *)&buf->mz_chunk[i];
+			tze->tze_value = BSWAP_64(tze->tze_value);
+			tze->tze_value2 = BSWAP_64(tze->tze_value2);
+			tze->tze_fid_oid = BSWAP_32(tze->tze_fid_oid);
+			tze->tze_fid_ver = BSWAP_32(tze->tze_fid_ver);
+			tze->tze_cd = BSWAP_32(tze->tze_cd);
+			/* tze_name is a char array - no byteswap needed */
+		} else {
+			buf->mz_chunk[i].mze_value =
+			    BSWAP_64(buf->mz_chunk[i].mze_value);
+			buf->mz_chunk[i].mze_cd =
+			    BSWAP_32(buf->mz_chunk[i].mze_cd);
+		}
 	}
 }
 
@@ -310,9 +348,18 @@ mze_insert(zap_t *zap, uint16_t chunkid, uint64_t hash)
 	mze.mze_chunkid = chunkid;
 	ASSERT0(hash & 0xffffffff);
 	mze.mze_hash = hash >> 32;
-	ASSERT3U(MZE_PHYS(zap, &mze)->mze_cd, <=, 0xffff);
-	mze.mze_cd = (uint16_t)MZE_PHYS(zap, &mze)->mze_cd;
-	ASSERT(MZE_PHYS(zap, &mze)->mze_name[0] != 0);
+	/* detect TinyZAP flag written at create time */
+	if (zap->zap_m.zap_tiny) {
+		tzap_ent_phys_t *tze =
+		    (tzap_ent_phys_t *)&zap_m_phys(zap)->mz_chunk[chunkid];
+		ASSERT3U(tze->tze_cd, <=, 0xffff);
+		mze.mze_cd = (uint16_t)tze->tze_cd;
+		ASSERT(tze->tze_name[0] != 0);
+	} else {
+		ASSERT3U(MZE_PHYS(zap, &mze)->mze_cd, <=, 0xffff);
+		mze.mze_cd = (uint16_t)MZE_PHYS(zap, &mze)->mze_cd;
+		ASSERT(MZE_PHYS(zap, &mze)->mze_name[0] != 0);
+	}
 	zfs_btree_add(&zap->zap_m.zap_tree, &mze);
 }
 
@@ -335,8 +382,19 @@ mze_find(zap_name_t *zn, zfs_btree_index_t *idx)
 		mze = zfs_btree_next(tree, idx, idx);
 	for (; mze && mze->mze_hash == mze_tofind.mze_hash;
 	    mze = zfs_btree_next(tree, idx, idx)) {
-		ASSERT3U(mze->mze_cd, ==, MZE_PHYS(zn->zn_zap, mze)->mze_cd);
-		if (zap_match(zn, MZE_PHYS(zn->zn_zap, mze)->mze_name))
+		const char *ename;
+		uint32_t ecd;
+		if (zn->zn_zap->zap_m.zap_tiny) {
+			tzap_ent_phys_t *tze = TZE_PHYS(zn->zn_zap, mze);
+			ename = tze->tze_name;
+			ecd = tze->tze_cd;
+		} else {
+			mzap_ent_phys_t *mzep = MZE_PHYS(zn->zn_zap, mze);
+			ename = mzep->mze_name;
+			ecd = mzep->mze_cd;
+		}
+		ASSERT3U(mze->mze_cd, ==, ecd);
+		if (zap_match(zn, ename))
 			return (mze);
 	}
 
@@ -459,6 +517,9 @@ mzap_open(dmu_buf_t *db)
 		zap->zap_normflags = zap_m_phys(zap)->mz_normflags;
 		zap->zap_m.zap_num_chunks = db->db_size / MZAP_ENT_LEN - 1;
 
+		/* detect TinyZAP flag written at create time */
+		zap->zap_m.zap_tiny = (zap_m_phys(zap)->mz_flags ==
+		    MZAP_FLAG_TINYZAP);
 		/*
 		 * Reduce B-tree leaf from 4KB to 512 bytes to reduce memmove()
 		 * overhead on massive inserts below.  It still allows to store
@@ -469,11 +530,17 @@ mzap_open(dmu_buf_t *db)
 
 		zap_name_t *zn = zap_name_alloc(zap);
 		for (uint16_t i = 0; i < zap->zap_m.zap_num_chunks; i++) {
-			mzap_ent_phys_t *mze =
-			    &zap_m_phys(zap)->mz_chunk[i];
-			if (mze->mze_name[0]) {
+			const char *name;
+			if (zap->zap_m.zap_tiny) {
+				tzap_ent_phys_t *tze = (tzap_ent_phys_t *)
+				    &zap_m_phys(zap)->mz_chunk[i];
+				name = tze->tze_name;
+			} else {
+				name = zap_m_phys(zap)->mz_chunk[i].mze_name;
+			}
+			if (name[0]) {
 				zap->zap_m.zap_num_entries++;
-				zap_name_init_str(zn, mze->mze_name, 0);
+				zap_name_init_str(zn, name, 0);
 				mze_insert(zap, i, zn->zn_hash);
 			}
 		}
@@ -574,7 +641,7 @@ zap_lockdir_impl(dnode_t *dn, dmu_buf_t *db, const void *tag, dmu_tx_t *tx,
 	    zap->zap_m.zap_num_entries <= zap->zap_m.zap_num_chunks);
 	if (zap->zap_ismicro && tx && adding &&
 	    zap->zap_m.zap_num_entries == zap->zap_m.zap_num_chunks) {
-		uint64_t newsz = db->db_size + SPA_MINBLOCKSIZE;
+		uint64_t newsz = db->db_size << 1;
 		if (newsz > zap_micro_max_size) {
 			dprintf("upgrading obj %llu: num_entries=%u\n",
 			    (u_longlong_t)obj, zap->zap_m.zap_num_entries);
@@ -586,7 +653,7 @@ zap_lockdir_impl(dnode_t *dn, dmu_buf_t *db, const void *tag, dmu_tx_t *tx,
 		}
 		VERIFY0(dmu_object_set_blocksize(os, obj, newsz, 0, tx));
 		zap->zap_m.zap_num_chunks =
-		    db->db_size / MZAP_ENT_LEN - 1;
+		    newsz / MZAP_ENT_LEN - 1;
 	}
 
 	*zapp = zap;
@@ -676,15 +743,39 @@ mzap_upgrade(zap_t **zapp, const void *tag, dmu_tx_t *tx, zap_flags_t flags)
 
 	zap_name_t *zn = zap_name_alloc(zap);
 	for (int i = 0; i < nchunks; i++) {
-		mzap_ent_phys_t *mze = &mzp->mz_chunk[i];
-		if (mze->mze_name[0] == 0)
-			continue;
-		dprintf("adding %s=%llu\n",
-		    mze->mze_name, (u_longlong_t)mze->mze_value);
-		zap_name_init_str(zn, mze->mze_name, 0);
-		/* If we fail here, we would end up losing entries */
-		VERIFY0(fzap_add_cd(zn, 8, 1, &mze->mze_value, mze->mze_cd,
-		    tag, tx));
+		if (mzp->mz_flags == MZAP_FLAG_TINYZAP) {
+			/*
+			 * tze_value   = lzd_reg       (8 bytes)
+			 * tze_value2  = lzd_fid.f_seq (8 bytes)
+			 * tze_fid_oid = lzd_fid.f_oid (4 bytes)
+			 * tze_fid_ver = lzd_fid.f_ver (4 bytes)
+			 * Store as 3 x uint64 (integer_size=8, num_integers=3).
+			 */
+			tzap_ent_phys_t *tze =
+			    (tzap_ent_phys_t *)&mzp->mz_chunk[i];
+			if (tze->tze_name[0] == 0)
+				continue;
+			dprintf("upgrading tiny %s\n", tze->tze_name);
+			zap_name_init_str(zn, tze->tze_name, 0);
+			uint8_t buf[24];
+			memcpy(buf, &tze->tze_value, 8);
+			memcpy(buf + 8, &tze->tze_value2, 8);
+			memcpy(buf + 16, &tze->tze_fid_oid, 4);
+			memcpy(buf + 20, &tze->tze_fid_ver, 4);
+			VERIFY0(fzap_add_cd(zn, 8, 3, buf,
+			    tze->tze_cd, tag, tx));
+		} else {
+			mzap_ent_phys_t *mze =
+			    (mzap_ent_phys_t *)&mzp->mz_chunk[i];
+			if (mze->mze_name[0] == 0)
+				continue;
+			dprintf("adding %s=%llu\n",
+			    mze->mze_name, (u_longlong_t)mze->mze_value);
+			zap_name_init_str(zn, mze->mze_name, 0);
+			/* If we fail here, we would end up losing entries */
+			VERIFY0(fzap_add_cd(zn, 8, 1, &mze->mze_value, mze->mze_cd,
+			    tag, tx));
+		}
 		zap = zn->zn_zap;	/* fzap_add_cd() may change zap */
 	}
 	zap_name_free(zn);
@@ -724,13 +815,21 @@ mzap_create_impl(dnode_t *dn, int normflags, zap_flags_t flags, dmu_tx_t *tx)
 	    ((uintptr_t)db ^ (uintptr_t)tx ^ (dn->dn_object << 1)) | 1ULL;
 	zp->mz_normflags = normflags;
 
-	if (flags != 0) {
+	/* write TinyZAP flag if requested; fat zap upgrade path unchanged */
+	zp->mz_flags = (flags & ZAP_FLAG_TINYZAP) ? MZAP_FLAG_TINYZAP : 0;
+
+	/*
+	 * Strip MZAP_FLAG_TINYZAP before checking for fat zap flags.
+	 * TinyZAP stays as a MicroZAP variant - do NOT upgrade it.
+	 */
+	zap_flags_t fzap_flags = flags & ~ZAP_FLAG_TINYZAP;
+	if (fzap_flags != 0) {
 		zap_t *zap;
 		/* Only fat zap supports flags; upgrade immediately. */
 		VERIFY(dnode_add_ref(dn, FTAG));
 		VERIFY0(zap_lockdir_impl(dn, db, FTAG, tx, RW_WRITER,
 		    B_FALSE, B_FALSE, &zap));
-		VERIFY0(mzap_upgrade(&zap, FTAG, tx, flags));
+		VERIFY0(mzap_upgrade(&zap, FTAG, tx, fzap_flags));
 		zap_unlockdir(zap, FTAG);
 	} else {
 		dmu_buf_rele(db, FTAG);
@@ -940,6 +1039,10 @@ mzap_normalization_conflict(zap_t *zap, zap_name_t *zn, mzap_ent_t *mze,
 	if (zap->zap_normflags == 0)
 		return (B_FALSE);
 
+	/* TinyZAP: Lustre never uses normalization. */
+	if (zap->zap_m.zap_tiny)
+		return (B_FALSE);
+
 	for (other = zfs_btree_prev(&zap->zap_m.zap_tree, idx, &oidx);
 	    other && other->mze_hash == mze->mze_hash;
 	    other = zfs_btree_prev(&zap->zap_m.zap_tree, &oidx, &oidx)) {
@@ -1014,6 +1117,24 @@ zap_lookup_impl(zap_t *zap, const char *name,
 				err = SET_ERROR(EOVERFLOW);
 			} else if (integer_size != 8) {
 				err = SET_ERROR(EINVAL);
+			} else if (zap->zap_m.zap_tiny && num_integers >= 3) {
+				/*
+				 * TinyZAP lookup: reassemble luz_direntry from
+				 * tzap_ent_phys_t fields into caller's buffer.
+				 */
+				tzap_ent_phys_t *tze = TZE_PHYS(zap, mze);
+				uint8_t *dst = buf;
+				memcpy(dst, &tze->tze_value, 8);
+				memcpy(dst + 8, &tze->tze_value2, 8);
+				memcpy(dst + 16, &tze->tze_fid_oid, 4);
+				memcpy(dst + 20, &tze->tze_fid_ver, 4);
+
+				if (realname != NULL)
+					(void) strlcpy(realname,
+					    tze->tze_name, rn_len);
+
+				if (ncp)
+					*ncp = B_FALSE; /* no normalization on Lustre dirs */
 			} else {
 				*(uint64_t *)buf =
 				    MZE_PHYS(zap, mze)->mze_value;
@@ -1179,7 +1300,7 @@ zap_length(objset_t *os, uint64_t zapobj, const char *name,
 			if (integer_size)
 				*integer_size = 8;
 			if (num_integers)
-				*num_integers = 1;
+				*num_integers = zap->zap_m.zap_tiny ? 3 : 1;
 		}
 	}
 	zap_name_free(zn);
@@ -1251,6 +1372,72 @@ again:
 	cmn_err(CE_PANIC, "out of entries!");
 }
 
+/*
+ * Add an entry to a TinyZAP, where the value is passed in as a luz_direntry
+ * structure. This is used by Lustre, which passes the value as a luz_direntry
+ * (24 bytes) instead of a uint64_t. The tinyzap entry format (tzap_ent_phys_t)
+ * is designed to store the luz_direntry fields directly.
+ */
+static void
+mzap_addent_tiny(zap_name_t *zn, const void *val)
+{
+	zap_t *zap = zn->zn_zap;
+	const uint8_t *src = val;
+
+	ASSERT(RW_WRITE_HELD(&zap->zap_rwlock));
+	ASSERT(zap->zap_ismicro);
+	ASSERT(zap->zap_m.zap_tiny);
+
+#ifdef ZFS_DEBUG
+	for (int i = 0; i < zap->zap_m.zap_num_chunks; i++) {
+		tzap_ent_phys_t *tze =
+		    (tzap_ent_phys_t *)&zap_m_phys(zap)->mz_chunk[i];
+		if (tze->tze_name[0] == 0)
+			continue;
+		ASSERT(strcmp(zn->zn_key_orig, tze->tze_name) != 0);
+	}
+#endif
+
+	uint16_t start = zap->zap_m.zap_alloc_next;
+	uint32_t cd = mze_find_unused_cd(zap, zn->zn_hash);
+	/* given the limited size of the tinyzap, this can't happen */
+	ASSERT(cd < zap_maxcd(zap));
+
+again:
+	for (uint16_t i = start; i < zap->zap_m.zap_num_chunks; i++) {
+		tzap_ent_phys_t *tze =
+		    (tzap_ent_phys_t *)&zap_m_phys(zap)->mz_chunk[i];
+		if (tze->tze_name[0] == 0) {
+			/*
+			 * luz_direntry layout		-> tzap_ent_phys_t:
+			 * [0..7]   lzd_reg		-> tze_value
+			 * [8..15]  lzd_fid.f_seq	-> tze_value2
+			 * [16..19] lzd_fid.f_oid	-> tze_fid_oid
+			 * [20..23] lzd_fid.f_ver	-> tze_fid_ver
+			 */
+			memcpy(&tze->tze_value, src, 8);
+			memcpy(&tze->tze_value2, src + 8, 8);
+			memcpy(&tze->tze_fid_oid, src + 16, 4);
+			memcpy(&tze->tze_fid_ver, src + 20, 4);
+			tze->tze_cd = cd;
+			(void) strlcpy(tze->tze_name, zn->zn_key_orig,
+			    TZAP_NAME_LEN);
+			zap->zap_m.zap_num_entries++;
+			zap->zap_m.zap_alloc_next = i + 1;
+			if (zap->zap_m.zap_alloc_next ==
+			    zap->zap_m.zap_num_chunks)
+				zap->zap_m.zap_alloc_next = 0;
+			mze_insert(zap, i, zn->zn_hash);
+			return;
+		}
+	}
+	if (start != 0) {
+		start = 0;
+		goto again;
+	}
+	cmn_err(CE_PANIC, "out of tiny entries!");
+}
+
 static int
 zap_add_impl(zap_t *zap, const char *key,
     int integer_size, uint64_t num_integers,
@@ -1267,6 +1454,29 @@ zap_add_impl(zap_t *zap, const char *key,
 	if (!zap->zap_ismicro) {
 		err = fzap_add(zn, integer_size, num_integers, val, tag, tx);
 		zap = zn->zn_zap;	/* fzap_add() may change zap */
+	} else if (zap->zap_m.zap_tiny) {
+		/*
+		 * TinyZAP path: luz_direntry fits in tzap_ent_phys_t.
+		 * TinyZAP only accepts integer_size=8,
+		 * num_integers=3, key shorter than TZAP_NAME_LEN.
+		 * Anything else must upgrade to FatZAP.
+		 */
+		if (integer_size == 8 && num_integers == 3 &&
+		    strlen(key) < TZAP_NAME_LEN) {
+			zfs_btree_index_t idx;
+			if (mze_find(zn, &idx) != NULL) {
+				err = SET_ERROR(EEXIST);
+			} else {
+				mzap_addent_tiny(zn, val);
+			}
+		} else {
+			err = mzap_upgrade(&zn->zn_zap, tag, tx, 0);
+			if (err == 0) {
+				err = fzap_add(zn, integer_size, num_integers,
+				    val, tag, tx);
+			}
+			zap = zn->zn_zap;
+		}
 	} else if (integer_size != 8 || num_integers != 1 ||
 	    strlen(key) >= MZAP_NAME_LEN ||
 	    !mze_canfit_fzap_leaf(zn, zn->zn_hash)) {
@@ -1277,6 +1487,7 @@ zap_add_impl(zap_t *zap, const char *key,
 		}
 		zap = zn->zn_zap;	/* fzap_add() may change zap */
 	} else {
+		VERIFY(!zap->zap_m.zap_tiny); /* wrong for TinyZAP */
 		zfs_btree_index_t idx;
 		if (mze_find(zn, &idx) != NULL) {
 			err = SET_ERROR(EEXIST);
@@ -1397,6 +1608,37 @@ zap_update(objset_t *os, uint64_t zapobj, const char *name,
 		err = fzap_update(zn, integer_size, num_integers, val,
 		    FTAG, tx);
 		zap = zn->zn_zap;	/* fzap_update() may change zap */
+	} else if (zap->zap_m.zap_tiny) {
+		/* TinyZAP update path: update or insert a luz_direntry */
+		if (integer_size == 8 && num_integers == 3 &&
+		    strlen(name) < TZAP_NAME_LEN) {
+			zfs_btree_index_t idx;
+			mzap_ent_t *mze = mze_find(zn, &idx);
+			if (mze != NULL) {
+				/* entry exists: update in-place */
+				tzap_ent_phys_t *tze = TZE_PHYS(zap, mze);
+				const uint8_t *src = val;
+				memcpy(&tze->tze_value, src, 8);
+				memcpy(&tze->tze_value2, src + 8, 8);
+				memcpy(&tze->tze_fid_oid, src + 16, 4);
+				memcpy(&tze->tze_fid_ver, src + 20, 4);
+			} else {
+				/* entry doesn't exist - add new entry */
+				mzap_addent_tiny(zn, val);
+			}
+		} else {
+			/*
+			 * Key too long (>= TZAP_NAME_LEN) or wrong
+			 * integer_size/num_integers for TinyZAP.
+			 * Upgrade to FatZAP to handle it.
+			 */
+			err = mzap_upgrade(&zn->zn_zap, FTAG, tx, 0);
+			if (err == 0) {
+				err = fzap_update(zn, integer_size, num_integers,
+				    val, FTAG, tx);
+			}
+			zap = zn->zn_zap;
+		}
 	} else if (integer_size != 8 || num_integers != 1 ||
 	    strlen(name) >= MZAP_NAME_LEN) {
 		dprintf("upgrading obj %llu: intsz=%u numint=%llu name=%s\n",
@@ -1409,6 +1651,7 @@ zap_update(objset_t *os, uint64_t zapobj, const char *name,
 		}
 		zap = zn->zn_zap;	/* fzap_update() may change zap */
 	} else {
+		VERIFY(!zap->zap_m.zap_tiny); /* wrong for TinyZAP */
 		zfs_btree_index_t idx;
 		mzap_ent_t *mze = mze_find(zn, &idx);
 		if (mze != NULL) {
@@ -1501,7 +1744,10 @@ zap_remove_impl(zap_t *zap, const char *name,
 			err = SET_ERROR(ENOENT);
 		} else {
 			zap->zap_m.zap_num_entries--;
-			memset(MZE_PHYS(zap, mze), 0, sizeof (mzap_ent_phys_t));
+			dmu_buf_will_dirty(zap->zap_dbuf, tx);
+			/* Both mzap and tzap entries are MZAP_ENT_LEN bytes */
+			memset(&zap_m_phys(zap)->mz_chunk[mze->mze_chunkid],
+			    0, MZAP_ENT_LEN);
 			zfs_btree_remove_idx(&zap->zap_m.zap_tree, &idx);
 		}
 	}
@@ -1712,16 +1958,24 @@ zap_cursor_retrieve(zap_cursor_t *zc, zap_attribute_t *za)
 			    &idx, &idx);
 		}
 		if (mze) {
-			mzap_ent_phys_t *mzep = MZE_PHYS(zc->zc_zap, mze);
-			ASSERT3U(mze->mze_cd, ==, mzep->mze_cd);
-			za->za_normalization_conflict =
-			    mzap_normalization_conflict(zc->zc_zap, NULL,
-			    mze, &idx);
-			za->za_integer_length = 8;
-			za->za_num_integers = 1;
-			za->za_first_integer = mzep->mze_value;
-			(void) strlcpy(za->za_name, mzep->mze_name,
-			    sizeof (za->za_name));
+			if (zc->zc_zap->zap_m.zap_tiny) {
+				tzap_ent_phys_t *tze = TZE_PHYS(zc->zc_zap, mze);
+				za->za_integer_length = 8;
+				za->za_num_integers = 3;
+				za->za_first_integer = tze->tze_value;
+				za->za_normalization_conflict = B_FALSE;
+				(void) strlcpy(za->za_name, tze->tze_name,
+				    sizeof (za->za_name));
+			} else {
+				mzap_ent_phys_t *mzep = MZE_PHYS(zc->zc_zap, mze);
+				za->za_integer_length = 8;
+				za->za_num_integers = 1;
+				za->za_first_integer = mzep->mze_value;
+				za->za_normalization_conflict =
+				    mzap_normalization_conflict(zc->zc_zap, NULL, mze, &idx);
+				(void) strlcpy(za->za_name, mzep->mze_name,
+				    sizeof (za->za_name));
+			}
 			zc->zc_hash = (uint64_t)mze->mze_hash << 32;
 			zc->zc_cd = mze->mze_cd;
 			err = 0;
@@ -1758,8 +2012,16 @@ zap_get_stats(objset_t *os, uint64_t zapobj, zap_stats_t *zs)
 		zs->zs_blocksize = zap->zap_dbuf->db_size;
 		zs->zs_num_entries = zap->zap_m.zap_num_entries;
 		zs->zs_num_blocks = 1;
+
+		/* expose mz_flags to identify TinyZAP objects */
+		zs->zs_tinyzap_mz_flags = zap_m_phys(zap)->mz_flags;
+		zs->zs_is_tinyzap =
+		    (zap_m_phys(zap)->mz_flags == MZAP_FLAG_TINYZAP);
 	} else {
 		fzap_get_stats(zap, zs);
+		/*zs->zs_is_tinyzap = B_FALSE; //required? memset above
+		zs->zs_tinyzap_mz_flags = 0;
+		*/
 	}
 	zap_unlockdir(zap, FTAG);
 	return (0);
@@ -1819,5 +2081,5 @@ EXPORT_SYMBOL(zap_get_stats);
 
 /* CSTYLED */
 ZFS_MODULE_PARAM(zfs, , zap_micro_max_size, INT, ZMOD_RW,
-	"Maximum micro ZAP size, before converting to a fat ZAP, in bytes");
+	"Maximum micro/tiny ZAP size, before converting to a fat ZAP, in bytes");
 #endif

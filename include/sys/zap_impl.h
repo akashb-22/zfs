@@ -49,6 +49,46 @@ extern int fzap_default_block_shift;
 
 #define	ZAP_NEED_CD		(-1U)
 
+/* ASCII "TINY": TinyZAP entries, use tzap_ent_phys_t */
+#define	MZAP_FLAG_TINYZAP	0x54494E59ULL
+
+/*
+ * TinyZAP: Extended MicroZAP entry that can store two uint64 values.
+ * Used by Lustre to store both the ZFS dnode ID and Lustre FID per
+ * directory entry.
+ *
+ * luz_direntry is 24 bytes:
+ *   lzd_reg  (zpl_direntry): 8 bytes -> tze_value
+ *   lzd_fid.f_seq:           8 bytes -> tze_value2
+ *   lzd_fid.f_oid:           4 bytes -> tze_fid_oid  (was mze_cd)
+ *   lzd_fid.f_ver:           4 bytes -> tze_fid_ver  (was mze_pad, now 4B)
+ *
+ * Name shrinks: 64 - 8 - 8 - 4 - 4 - 4(cd) = 36 bytes.
+ * MicroZAP names are already hash-limited so 36 bytes is sufficient.
+ */
+#define	TZAP_NAME_LEN		(MZAP_ENT_LEN - 8 - 8 - 4 - 4 - 4) /* 36 bytes */
+
+/*
+ * TinyZAP physical entry: fits a full luz_direntry (24 bytes) plus
+ * a collision differentiator and a 36-byte name field.
+ *
+ * On-disk layout (64 bytes total):
+ *   tze_value    [0..7]   : lzd_reg   (zpl_direntry: dnode+type)
+ *   tze_value2   [8..15]  : lzd_fid.f_seq
+ *   tze_fid_oid  [16..19] : lzd_fid.f_oid
+ *   tze_fid_ver  [20..23] : lzd_fid.f_ver
+ *   tze_cd       [24..27] : collision differentiator
+ *   tze_name     [28..63] : entry name (36 bytes)
+ */
+typedef struct tzap_ent_phys {
+	uint64_t tze_value;	/* lzd_reg: dnode ID + type */
+	uint64_t tze_value2;	/* lzd_fid.f_seq */
+	uint32_t tze_fid_oid;	/* lzd_fid.f_oid */
+	uint32_t tze_fid_ver;	/* lzd_fid.f_ver */
+	uint32_t tze_cd;	/* collision differentiator */
+	char tze_name[TZAP_NAME_LEN];	/* entry name (36 bytes) */
+} tzap_ent_phys_t;
+
 typedef struct mzap_ent_phys {
 	uint64_t mze_value;
 	uint32_t mze_cd;
@@ -60,7 +100,8 @@ typedef struct mzap_phys {
 	uint64_t mz_block_type;	/* ZBT_MICRO */
 	uint64_t mz_salt;
 	uint64_t mz_normflags;
-	uint64_t mz_pad[5];
+	uint64_t mz_flags;	/* was mz_pad[0]: MZAP_FLAG_TINYZAP for TinyZAP */
+	uint64_t mz_pad[4];
 	mzap_ent_phys_t mz_chunk[1];
 	/* actually variable size depending on block size */
 } mzap_phys_t;
@@ -73,6 +114,13 @@ typedef struct mzap_ent {
 
 #define	MZE_PHYS(zap, mze) \
 	(&zap_m_phys(zap)->mz_chunk[(mze)->mze_chunkid])
+
+/*
+ * TinyZAP accessor: cast chunk slot to tzap_ent_phys_t.
+ * Only valid if zap is a TinyZAP (zap_m.zap_tiny is true).
+ */
+#define	TZE_PHYS(zap, mze) \
+	((tzap_ent_phys_t *)&zap_m_phys(zap)->mz_chunk[(mze)->mze_chunkid])
 
 /*
  * The (fat) zap is stored in one object. It is an array of
@@ -164,6 +212,7 @@ typedef struct zap {
 			int16_t zap_num_entries;
 			int16_t zap_num_chunks;
 			int16_t zap_alloc_next;
+			boolean_t zap_tiny;	/* B_TRUE if TinyZAP (tzap_ent_phys_t) */
 			zfs_btree_t zap_tree;
 		} zap_micro;
 	} zap_u;
