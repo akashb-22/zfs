@@ -1089,10 +1089,59 @@ dump_zap_stats(objset_t *os, uint64_t object)
 		return;
 
 	if (zs.zs_ptrtbl_len == 0) {
-		ASSERT(zs.zs_num_blocks == 1);
-		(void) printf("\tmicrozap: %llu bytes, %llu entries\n",
-		    (u_longlong_t)zs.zs_blocksize,
-		    (u_longlong_t)zs.zs_num_entries);
+		if (zs.zs_is_tinyzap) {
+			/*
+			 * TinyZAP: MicroZAP variant with MZAP_FLAG_TINYZAP
+			 * set. this can store upto (2-4) entries based on the
+			 * blob size of the name and value.
+			 */
+			(void) printf("\ttinyzap: %llu bytes, %llu entries"
+			    ", mz_flags=0x%llx\n",
+			    (u_longlong_t)zs.zs_blocksize,
+			    (u_longlong_t)zs.zs_num_entries,
+			    (u_longlong_t)zs.zs_tinyzap_mz_flags);
+			/*
+			 * Dump individual TinyZAP entries when verbosity is high enough.
+			 */
+			if (dump_opt['d'] >= 6) {
+				dmu_buf_t *db;
+				if (dmu_buf_hold(os, object, 0, FTAG, &db,
+				    DMU_READ_PREFETCH) == 0) {
+					mzap_phys_t *mzp = db->db_data;
+					uint16_t vlen = TZAP_GET_VLEN(mzp->mz_flags);
+					int nchunks = db->db_size / MZAP_ENT_LEN - 1;
+					int found = 0;
+					for (int i = 0; i < nchunks; i++) {
+						tzap_ent_phys_t *tze =
+							(tzap_ent_phys_t *)
+							&mzp->mz_chunk[i];
+						if (tze_name_ptr(tze, vlen)[0] == 0)
+							continue;
+						uint16_t cd = *tze_cd_ptr(tze, vlen);
+						uint16_t nwords = vlen / 8;
+						(void) printf("\t\t[%d] name='%s'\n"
+						    "\t\t    cd=0x%x\n"
+						    "\t\t    value=", i,
+						    tze_name_ptr(tze, vlen),
+						    cd);
+						for (int w = 0; w < nwords; w++) {
+							uint64_t v;
+							memcpy(&v, tze_value(tze) + w * 8, 8);
+							(void) printf("0x%016llx%s", (u_longlong_t)v, w + 1 < nwords ? ":" : "");
+						}
+						(void) printf("\n");
+						found++;
+					}
+					if (found == 0)
+						(void) printf("\t\t<no entries>\n");
+					dmu_buf_rele(db, FTAG);
+				}
+			}
+		} else {
+			(void) printf("\tmicrozap: %llu bytes, %llu entries\n",
+			    (u_longlong_t)zs.zs_blocksize,
+			    (u_longlong_t)zs.zs_num_entries);
+		}
 		return;
 	}
 

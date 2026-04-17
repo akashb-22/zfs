@@ -49,6 +49,74 @@ extern int fzap_default_block_shift;
 
 #define	ZAP_NEED_CD		(-1U)
 
+/* ASCII "TINY" in HIGH 32 bits: TinyZAP entries, use tzap_ent_phys_t */
+#define	MZAP_FLAG_TINYZAP	0x54494E5900000000ULL
+
+/*
+ * TinyZAP: a special case of microZAP with a fixed entry size of 64 bytes,
+ * and can store upto 32 bytes of value (4×uint64) in the entry itself but
+ * with a fixed name length of 36 bytes. This could be helpful to avoid ZAPs
+ * from prematurely upgrading to FatZAP due to limited number of entries.
+ * MicroZAP names are already hash-limited so 36 bytes is sufficient.
+ */
+#define	TZAP_MAX_VLEN	32	/* max value: 4×uint64 */
+#define	TZAP_MIN_VLEN	8	/* min value: 1×uint64 */
+
+/* value length (vlen) stored in low 16 bits of mz_flags */
+#define	MZAP_FLAG_TINYZAP_VLEN_SHIFT	16
+#define	MZAP_FLAG_TINYZAP_VLEN_MASK	(0xFFFFULL << MZAP_FLAG_TINYZAP_VLEN_SHIFT)
+#define	TZAP_SET_VLEN(flags, vlen) \
+	(((flags) & ~MZAP_FLAG_TINYZAP_VLEN_MASK) | \
+	((uint64_t)(vlen) << MZAP_FLAG_TINYZAP_VLEN_SHIFT))
+#define	TZAP_GET_VLEN(flags) \
+	((uint16_t)(((flags) & MZAP_FLAG_TINYZAP_VLEN_MASK) >> \
+	MZAP_FLAG_TINYZAP_VLEN_SHIFT))
+
+/* name length is derived at runtime from value_len */
+#define	TZAP_NAME_LEN(vlen)	(MZAP_ENT_LEN - (vlen) - sizeof (uint32_t))
+
+/* detect TinyZAP by checking HIGH 32 bits only */
+#define	MZAP_IS_TINYZAP(flags) \
+	(((flags) & 0xFFFFFFFF00000000ULL) == MZAP_FLAG_TINYZAP)
+
+/*
+ * TinyZAP physical entry: generic 64-byte chunk.
+ *
+ * Internal layout is determined by value_len in mz_flags header:
+ * [0 .. vlen-1]	: raw value blob (1 - 4 x uint64)
+ * [vlen .. vlen+3]	: tze_cd (uint32_t)
+ * [vlen+4 .. 63]	: tze_name (TZAP_NAME_LEN(vlen) bytes)
+ * 
+ * vlen | name_len | use case
+ * --------------------------------------------------------------
+ *  8	|	52	|	1xuint64 (plain ZFS dentry)
+ * 16	|	44	|	2xuint64
+ * 24	|	36	|	3xuint64 (Lustre luz_direntry)
+ * 32	|	28	|	4xuint64
+ */
+typedef struct tzap_ent_phys {
+	/* value blob: up to 4×uint64, actual length determined by mz_flags */
+	uint8_t tze_data[MZAP_ENT_LEN];
+} tzap_ent_phys_t;
+
+/* Runtime accessors: vlen must come from TZAP_GET_VLEN(mz_flags) */
+static inline uint8_t *
+tze_value(tzap_ent_phys_t *tze)
+{
+	return tze->tze_data;
+}
+
+static inline uint32_t *
+tze_cd_ptr(tzap_ent_phys_t *tze, uint16_t vlen)
+{
+	return (uint32_t *)(tze->tze_data + vlen);
+}
+static inline char *
+tze_name_ptr(tzap_ent_phys_t *tze, uint16_t vlen)
+{
+	return (char *)(tze->tze_data + vlen + sizeof (uint32_t));
+}
+
 typedef struct mzap_ent_phys {
 	uint64_t mze_value;
 	uint32_t mze_cd;
@@ -60,7 +128,8 @@ typedef struct mzap_phys {
 	uint64_t mz_block_type;	/* ZBT_MICRO */
 	uint64_t mz_salt;
 	uint64_t mz_normflags;
-	uint64_t mz_pad[5];
+	uint64_t mz_flags;	/* was mz_pad[0]: MZAP_FLAG_TINYZAP for TinyZAP */
+	uint64_t mz_pad[4];
 	mzap_ent_phys_t mz_chunk[1];
 	/* actually variable size depending on block size */
 } mzap_phys_t;
@@ -73,6 +142,13 @@ typedef struct mzap_ent {
 
 #define	MZE_PHYS(zap, mze) \
 	(&zap_m_phys(zap)->mz_chunk[(mze)->mze_chunkid])
+
+/*
+ * TinyZAP accessor: cast chunk slot to tzap_ent_phys_t.
+ * Only valid if zap is a TinyZAP (zap_m.zap_tiny is true).
+ */
+#define	TZE_PHYS(zap, mze) \
+	((tzap_ent_phys_t *)&zap_m_phys(zap)->mz_chunk[(mze)->mze_chunkid])
 
 /*
  * The (fat) zap is stored in one object. It is an array of
@@ -164,6 +240,7 @@ typedef struct zap {
 			int16_t zap_num_entries;
 			int16_t zap_num_chunks;
 			int16_t zap_alloc_next;
+			uint16_t zap_vlen; /* 0 = MicroZAP, 8-32 = TinyZAP value_len */
 			zfs_btree_t zap_tree;
 		} zap_micro;
 	} zap_u;

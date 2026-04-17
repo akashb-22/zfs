@@ -110,6 +110,8 @@ typedef enum zap_flags {
 	 * already randomly distributed.
 	 */
 	ZAP_FLAG_PRE_HASHED_KEY = 1 << 2,
+	/* TinyZAP interface */
+	ZAP_FLAG_TINYZAP = 1 << 3,
 #if defined(__linux__) && defined(_KERNEL)
 } zfs_zap_flags_t;
 #define	zap_flags_t	zfs_zap_flags_t
@@ -462,6 +464,17 @@ typedef struct zap_stats {
 	uint64_t zs_num_leafs;		/* The number of leaf blocks */
 	uint64_t zs_num_entries;	/* The number of zap entries */
 	uint64_t zs_salt;		/* salt to stir into hash function */
+
+	/*
+	 * TinyZAP: set to B_TRUE if this is a MicroZAP with
+	 * MZAP_FLAG_TINYZAP set in mz_flags. Each entry stores up to
+	 * TZAP_MAX_VLEN (32) bytes of value instead of a single uint64.
+	 * The actual value length is encoded in the high bits of mz_flags
+	 * and retrieved via TZAP_GET_VLEN(mz_flags).
+	 */
+	boolean_t zs_is_tinyzap;
+	uint64_t zs_tinyzap_vlen;	/* value length per entry (8-32) */
+	uint64_t  zs_tinyzap_mz_flags;	/* raw mz_flags from disk */
 
 	/*
 	 * Histograms.  For all histograms, the last index
