@@ -27,10 +27,12 @@ nodist_%C%_test_zap_SOURCES = \
 	module/zfs/zap_impl.c \
 	module/zfs/zap_micro.c \
 	module/zfs/zap_leaf.c \
+	module/zfs/zap_tiny.c \
 	module/zfs/u8_textprep.c
 
 %C%_test_zap_SOURCES = \
-	%D%/test_zap.c
+	%D%/test_zap.c \
+	%D%/mock_spa.c
 
 %C%_test_zap_LDADD = \
 	libspl.la \
